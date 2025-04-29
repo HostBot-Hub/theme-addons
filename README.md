@@ -40,5 +40,5 @@ GPL-2.0+ — Same license as WordPress. Feel free to adapt, extend, or fork.
 
 ## Author
 
-Maintained by [Hostbot](https://hostbot.io/) under the `hostbot-hub` GitHub account.
-
+Developed and maintained by Hostbot (https://hostbot.ca/).
+(Note: Hostbot primarily offers hosting and web services — this repository is maintained as a free community resource.)
