@@ -20,6 +20,7 @@ Adds a “Duplicate” link to **posts, pages, and all custom post types**, incl
 
 - Clones post content, excerpt, metadata, and custom fields.
 - Generates the duplicate as a **draft** with "(Copy)" appended to the title.
+- Auto redirects to the new draft post/page.
 - Regenerates Elementor CSS if Elementor is installed.
 - Nonce-protected and visible to users with post edit permissions.
 
