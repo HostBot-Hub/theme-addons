@@ -1,157 +1,175 @@
 <?php
+/**
+ * Snippet Name:    User Switching
+ * Snippet Type:    PHP (WordPress admin hook)
+ * Description:     Lets an admin switch to another user (stashing their own ID in a cookie) and switch back.
+ * Author:          HostBot
+ * Version:         1.1.0
+ *
+ * Changelog:
+ * - 1.1.0: Added user existence checks, safe redirects, i18n, and consistent cookie handling.
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
+
+define( 'BOT_ORIGINAL_ADMIN_COOKIE', 'bot_original_admin_id' );
+define( 'BOT_COOKIE_EXPIRE',          3600 ); // seconds
 
 /**
- * Switch to a different user. 
- * If current user is an admin and we haven't switched yet, store the current admin ID in a cookie.
+ * Core switch logic.
  */
-function custom_user_switching($user_id) {
-    
-    // If current user is admin and we haven't set an "original_admin_id" cookie, set it now
-    if ( current_user_can('administrator') && ! isset($_COOKIE['original_admin_id']) ) {
-        $current_admin_id = get_current_user_id();
-
-        // Set cookie to expire in 1 hour (3600 seconds). Adjust to fit your needs.
+function bot_user_switching( $user_id ) {
+    if ( current_user_can( 'administrator' ) && ! isset( $_COOKIE[ BOT_ORIGINAL_ADMIN_COOKIE ] ) ) {
+        $orig = get_current_user_id();
         setcookie(
-            'original_admin_id',
-            $current_admin_id,
-            time() + 3600,
-            SITECOOKIEPATH,
+            BOT_ORIGINAL_ADMIN_COOKIE,
+            $orig,
+            time() + BOT_COOKIE_EXPIRE,
+            COOKIEPATH,
             COOKIE_DOMAIN,
             is_ssl(),
-            true // HTTPOnly
+            true
         );
-        // Make sure the cookie is available this request by populating $_COOKIE immediately
-        $_COOKIE['original_admin_id'] = $current_admin_id;
+        $_COOKIE[ BOT_ORIGINAL_ADMIN_COOKIE ] = $orig;
     }
 
-    // Perform the actual switch
     wp_clear_auth_cookie();
-    wp_set_current_user($user_id);
-    wp_set_auth_cookie($user_id);
-
-    // Redirect to admin dashboard (or somewhere else)
-    wp_redirect(admin_url());
+    wp_set_current_user( $user_id );
+    wp_set_auth_cookie( $user_id );
+    wp_safe_redirect( admin_url() );
     exit();
 }
 
-
-
 /**
- * Add "Switch to User" link to each user row, if:
- * - Current user is admin
- * - The row user is NOT the current user
+ * “Switch To” link in each user row.
  */
-function add_switch_user_link($actions, $user) {
-    if ( current_user_can('administrator') && get_current_user_id() !== $user->ID ) {
-        // Build a nonce-protected link
-        $switch_link = wp_nonce_url(
-            admin_url('users.php?action=switch_user&user=' . $user->ID),
-            'switch_user_' . $user->ID
-        );
-        $actions['switch_user'] = '<a href="' . $switch_link . '">Switch To User</a>';
+function bot_add_switch_user_link( $actions, $user ) {
+    if ( current_user_can( 'administrator' ) && get_current_user_id() !== $user->ID ) {
+        $target = get_userdata( $user->ID );
+        if ( $target && user_can( $target, 'read' ) ) {
+            $url = wp_nonce_url(
+                add_query_arg(
+                    [
+                        'action' => 'bot_switch_user',
+                        'user'   => $user->ID,
+                    ],
+                    admin_url( 'users.php' )
+                ),
+                'bot_switch_user_' . $user->ID
+            );
+            $actions['bot_switch_user'] = sprintf(
+                '<a href="%1$s">%2$s</a>',
+                esc_url( $url ),
+                esc_html__( 'Switch To User', 'bot-user-switch' )
+            );
+        }
     }
     return $actions;
 }
-add_filter('user_row_actions', 'add_switch_user_link', 10, 2);
-
-
+add_filter( 'user_row_actions', 'bot_add_switch_user_link', 10, 2 );
 
 /**
- * If the URL has action=switch_user, verify nonce & switch.
+ * Handle “switch to” action.
  */
-function handle_user_switching_action() {
-    if ( isset($_GET['action']) && $_GET['action'] === 'switch_user' && current_user_can('administrator') ) {
-        $user_id = isset($_GET['user']) ? intval($_GET['user']) : 0;
-        
-        // Check our nonce for security
-        if ( $user_id && isset($_GET['_wpnonce']) && wp_verify_nonce($_GET['_wpnonce'], 'switch_user_' . $user_id ) ) {
-            custom_user_switching($user_id);
-        } else {
-            wp_die('Security check failed.');
+function bot_handle_user_switching_action() {
+    if (
+        empty( $_GET['action'] ) ||
+        'bot_switch_user' !== $_GET['action']
+    ) {
+        return;
+    }
+
+    if (
+        ! empty( $_GET['user'] ) &&
+        ! empty( $_GET['_wpnonce'] ) &&
+        current_user_can( 'administrator' ) &&
+        wp_verify_nonce( $_GET['_wpnonce'], 'bot_switch_user_' . intval( $_GET['user'] ) )
+    ) {
+        $user_id = intval( $_GET['user'] );
+        $target  = get_userdata( $user_id );
+
+        if ( $target && user_can( $target, 'read' ) ) {
+            bot_user_switching( $user_id );
         }
     }
+
+    wp_die( esc_html__( 'Invalid user selected or security check failed.', 'bot-user-switch' ) );
 }
-add_action('admin_init', 'handle_user_switching_action');
-
-
-
-function add_switch_back_link($wp_admin_bar) {
-    if ( isset($_COOKIE['original_admin_id']) ) {
-        $original_admin_id = (int) $_COOKIE['original_admin_id'];
-
-        // Show the link ONLY if you're not that same user
-        if ( $original_admin_id > 0 && get_current_user_id() !== $original_admin_id ) {
-
-            // Get the original user data for a nicer display
-            $original_user = get_userdata($original_admin_id);
-            $display_name  = $original_user ? $original_user->display_name : 'Original Admin'; 
-            // or you could use $original_user->user_login if you prefer
-
-            // Create a WP nonce
-            $nonce = wp_create_nonce( 'switch_back_' . $original_admin_id );
-
-            // Build the "Switch Back" URL
-            $switch_url = add_query_arg( [
-                'action'   => 'switch_back',
-                'user'     => $original_admin_id,
-                '_wpnonce' => $nonce
-            ], admin_url('users.php'));
-
-            // Add a node to the WP Admin Bar
-            $args = [
-                'id'    => 'switch-back',
-                'title' => 'Switch Back to ' . esc_html($display_name),
-                'href'  => $switch_url,
-                'meta'  => ['class' => 'switch-back-link']
-            ];
-            $wp_admin_bar->add_node($args);
-        }
-    }
-}
-add_action('admin_bar_menu', 'add_switch_back_link', 100);
-
-
+add_action( 'admin_init', 'bot_handle_user_switching_action' );
 
 /**
- * Handle the switch_back action. Verifies nonce, checks cookie, switches back to original admin.
+ * “Switch Back” link in the admin bar.
  */
-function handle_switch_back_action() {
-    if ( isset($_GET['action']) && $_GET['action'] === 'switch_back' ) {
-        $user_id = isset($_GET['user']) ? intval($_GET['user']) : 0;
+function bot_add_switch_back_link( $wp_admin_bar ) {
+    if ( empty( $_COOKIE[ BOT_ORIGINAL_ADMIN_COOKIE ] ) ) {
+        return;
+    }
 
-        if ( $user_id && isset($_GET['_wpnonce']) && wp_verify_nonce($_GET['_wpnonce'], 'switch_back_' . $user_id ) ) {
-            // Check the cookie to ensure the user_id matches
-            if ( isset($_COOKIE['original_admin_id']) && intval($_COOKIE['original_admin_id']) === $user_id ) {
+    $orig = intval( $_COOKIE[ BOT_ORIGINAL_ADMIN_COOKIE ] );
+    if ( $orig && get_current_user_id() !== $orig ) {
+        $user  = get_userdata( $orig );
+        $name  = $user ? $user->display_name : __( 'Original Admin', 'bot-user-switch' );
+        $nonce = wp_create_nonce( 'bot_switch_back_' . $orig );
+        $url   = add_query_arg(
+            [
+                'action'   => 'bot_switch_back',
+                'user'     => $orig,
+                '_wpnonce' => $nonce,
+            ],
+            admin_url( 'users.php' )
+        );
 
-                // Switch back
-                wp_clear_auth_cookie();
-                wp_set_current_user($user_id);
-                wp_set_auth_cookie($user_id);
-
-                // Clear the original_admin_id cookie now that we've switched back
-                setcookie(
-                    'original_admin_id',
-                    '',
-                    time() - 3600, // expire in the past
-                    SITECOOKIEPATH,
-                    COOKIE_DOMAIN,
-                    is_ssl(),
-                    true
-                );
-
-                // (Optional) Update $_COOKIE array so the link doesn�t appear if we immediately reload
-                unset($_COOKIE['original_admin_id']);
-
-                wp_redirect(admin_url());
-                exit();
-            } else {
-                wp_die('Invalid switch back request or your session has expired.');
-            }
-        } else {
-            wp_die('Security check failed.');
-        }
+        $wp_admin_bar->add_node( [
+            'id'    => 'bot-switch-back',
+            'title' => sprintf( esc_html__( 'Switch Back to %s', 'bot-user-switch' ), esc_html( $name ) ),
+            'href'  => esc_url( $url ),
+            'meta'  => [ 'class' => 'bot-switch-back-link' ],
+        ] );
     }
 }
-add_action('admin_init', 'handle_switch_back_action');
+add_action( 'admin_bar_menu', 'bot_add_switch_back_link', 100 );
 
-?>
+/**
+ * Handle “switch back” action.
+ */
+function bot_handle_switch_back_action() {
+    if (
+        empty( $_GET['action'] ) ||
+        'bot_switch_back' !== $_GET['action']
+    ) {
+        return;
+    }
+
+    if (
+        ! empty( $_GET['user'] ) &&
+        ! empty( $_GET['_wpnonce'] ) &&
+        wp_verify_nonce( $_GET['_wpnonce'], 'bot_switch_back_' . intval( $_GET['user'] ) ) &&
+        isset( $_COOKIE[ BOT_ORIGINAL_ADMIN_COOKIE ] ) &&
+        intval( $_COOKIE[ BOT_ORIGINAL_ADMIN_COOKIE ] ) === intval( $_GET['user'] )
+    ) {
+        $user_id = intval( $_GET['user'] );
+
+        wp_clear_auth_cookie();
+        wp_set_current_user( $user_id );
+        wp_set_auth_cookie( $user_id );
+
+        setcookie(
+            BOT_ORIGINAL_ADMIN_COOKIE,
+            '',
+            time() - BOT_COOKIE_EXPIRE,
+            COOKIEPATH,
+            COOKIE_DOMAIN,
+            is_ssl(),
+            true
+        );
+        unset( $_COOKIE[ BOT_ORIGINAL_ADMIN_COOKIE ] );
+
+        wp_safe_redirect( admin_url() );
+        exit();
+    }
+
+    wp_die( esc_html__( 'Invalid switch‑back request or session expired.', 'bot-user-switch' ) );
+}
+add_action( 'admin_init', 'bot_handle_switch_back_action' );
